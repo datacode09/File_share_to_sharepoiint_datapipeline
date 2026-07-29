@@ -1,0 +1,129 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    }
+  },
+  "triggers": {
+    "When_a_file_is_created": {
+      "type": "OpenApiConnection",
+      "splitOn": "@triggerOutputs()?['body']",
+      "recurrence": {
+        "frequency": "Minute",
+        "interval": 5
+      },
+      "inputs": {
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_filesystem",
+          "connectionName": "shared_filesystem",
+          "operationId": "OnNewFile"
+        },
+        "parameters": {
+          "folderPath": "<<SOURCE_FOLDER>>",
+          "inferContentType": true
+        }
+      }
+    }
+  },
+  "actions": {
+    "Get_file_content": {
+      "type": "OpenApiConnection",
+      "runAfter": {},
+      "inputs": {
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_filesystem",
+          "connectionName": "shared_filesystem",
+          "operationId": "GetFileContent"
+        },
+        "parameters": {
+          "path": "@triggerOutputs()?['body/Path']",
+          "inferContentType": true
+        }
+      }
+    },
+    "Get_file_metadata_in_SharePoint": {
+      "type": "OpenApiConnection",
+      "runAfter": {
+        "Get_file_content": [
+          "Succeeded",
+          "Failed",
+          "Skipped",
+          "TimedOut"
+        ]
+      },
+      "inputs": {
+        "host": {
+          "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+          "connectionName": "shared_sharepointonline",
+          "operationId": "GetFileMetadataByPath"
+        },
+        "parameters": {
+          "dataset": "<<SITE_URL>>",
+          "path": "@{'<<DEST_FOLDER>>/'}@{triggerOutputs()?['body/Name']}"
+        }
+      }
+    },
+    "File_already_exists_in_SharePoint": {
+      "type": "If",
+      "runAfter": {
+        "Get_file_metadata_in_SharePoint": [
+          "Succeeded",
+          "Failed"
+        ]
+      },
+      "expression": {
+        "and": [
+          {
+            "equals": [
+              "@outputs('Get_file_metadata_in_SharePoint')?['statusCode']",
+              200
+            ]
+          }
+        ]
+      },
+      "actions": {
+        "Update_file_in_SharePoint": {
+          "type": "OpenApiConnection",
+          "runAfter": {},
+          "inputs": {
+            "host": {
+              "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+              "connectionName": "shared_sharepointonline",
+              "operationId": "UpdateFile"
+            },
+            "parameters": {
+              "dataset": "<<SITE_URL>>",
+              "id": "@{'<<DEST_FOLDER>>/'}@{triggerOutputs()?['body/Name']}",
+              "body": "@body('Get_file_content')"
+            }
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Create_file_in_SharePoint": {
+            "type": "OpenApiConnection",
+            "runAfter": {},
+            "inputs": {
+              "host": {
+                "apiId": "/providers/Microsoft.PowerApps/apis/shared_sharepointonline",
+                "connectionName": "shared_sharepointonline",
+                "operationId": "CreateFile"
+              },
+              "parameters": {
+                "dataset": "<<SITE_URL>>",
+                "folderPath": "<<DEST_FOLDER>>",
+                "name": "@triggerOutputs()?['body/Name']",
+                "body": "@body('Get_file_content')"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "outputs": {}
+}
