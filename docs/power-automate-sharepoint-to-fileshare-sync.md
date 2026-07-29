@@ -1,42 +1,44 @@
-# Power Automate: Sync a SharePoint Path to an On-Prem File Share
+# Power Automate: Sync an On-Prem File Share to SharePoint
 
-This guide walks through building a Power Automate flow that keeps a file share
-(reachable only via an on-premises data gateway) in sync with a document
-library/folder in SharePoint Online.
+This guide walks through building a Power Automate flow that keeps a
+SharePoint document library/folder in sync with a file share that is only
+reachable via an on-premises data gateway.
 
 ## Architecture overview
 
 ```
-SharePoint Online (source folder)
-        │  (SharePoint connector - cloud, no gateway needed)
-        ▼
-   Power Automate flow
+On-prem / network file share (\\server\share\path)
         │  (File System connector - routed through On-Premises Data Gateway)
         ▼
-On-prem / network file share (\\server\share\path)
+   Power Automate flow
+        │  (SharePoint connector - cloud, no gateway needed)
+        ▼
+SharePoint Online (destination folder)
 ```
 
-- **SharePoint side**: uses the built-in **SharePoint** connector (cloud-to-cloud, no gateway required).
-- **File share side**: uses the **File System** connector, which requires the
-  **On-premises Data Gateway** because the share is not internet-reachable.
+- **File share side (source)**: uses the **File System** connector, which
+  requires the **On-premises Data Gateway** because the share is not
+  internet-reachable.
+- **SharePoint side (destination)**: uses the built-in **SharePoint**
+  connector (cloud-to-cloud, no gateway required).
 
 ---
 
 ## Prerequisites
 
 1. **Gateway host machine**: A Windows machine/VM that has network access to the
-   target file share (`\\server\sharename\folder`) and stays powered on/online.
+   source file share (`\\server\sharename\folder`) and stays powered on/online.
 2. **On-premises Data Gateway installed** on that machine, registered under the
    same Microsoft 365 / Entra ID tenant as your Power Automate environment.
    - Download: Power Automate portal → **Settings (gear) → On-premises data
      gateway → Install gateway**.
    - During setup you'll create/join a gateway and set a **recovery key** —
      store this somewhere safe (needed to add more admins or recover config).
-3. **Service account** with read/write NTFS permissions on the target share,
-   used to run the gateway service and the File System connection.
+3. **Service account** with at least **read** NTFS permissions on the source
+   share, used to run the gateway service and the File System connection.
 4. **Permissions**:
-   - You (or the flow owner) must have **Read** access to the SharePoint
-     library/folder being synced.
+   - You (or the flow owner) must have **Write** access to the SharePoint
+     library/folder being synced to.
    - You must be listed as an **admin or user** of the gateway resource in
      Power Automate (Data → Gateways).
 5. **Premium license**: The **File System** connector is a **Premium**
@@ -67,8 +69,8 @@ On-prem / network file share (\\server\share\path)
    - **Root folder**: the UNC path the gateway machine can reach, e.g.
      `\\fileserver01\SyncedDocs`
    - **Gateway**: choose the gateway you registered in Step 1.
-   - **Username / Password**: the service account with read/write access to
-     that share (format `DOMAIN\svc-account`).
+   - **Username / Password**: the service account with read access to that
+     share (format `DOMAIN\svc-account`).
 4. Save. The connection will validate against the gateway; fix any
    credential/network errors before continuing.
 
@@ -76,7 +78,7 @@ On-prem / network file share (\\server\share\path)
 
 - The **SharePoint** connector uses your normal Microsoft 365 sign-in — no
   gateway needed. It's created automatically the first time you add a
-  SharePoint trigger/action in the flow (Step 4).
+  SharePoint action in the flow (Step 4).
 
 ## Step 4 — Build the flow
 
@@ -88,61 +90,62 @@ one based on your needs.
 Best when the source is one flat folder and you want fast propagation.
 
 1. **Create** → **Automated cloud flow**.
-2. Trigger: **When a file is created or modified (properties only)**
-   (SharePoint connector).
+2. Trigger: **When a file is created (properties only)** — and/or add a
+   parallel flow with **When a file is modified (properties only)**
+   (File System connector, connection from Step 2).
+   - **Folder**: the on-prem folder to watch, relative to the connection's
+     root folder (e.g. `/ExportFolder`).
+   - This trigger **polls** the share through the gateway on an interval you
+     set (default every few minutes) — it is not instant push notification.
+3. Add action: **Get file content** (File System) — use the trigger's
+   `Path` output as the file identifier.
+4. Add action: **Create file** (SharePoint) — connection from Step 3.
    - **Site Address**: your SharePoint site.
-   - **List/Library**: the document library.
-   - **Folder**: (optional) restrict to a subfolder, e.g. `/Shared Documents/ExportFolder`.
-3. Add action: **Get file content** (SharePoint) — use the trigger's
-   `Id`/`ItemId` (or `{Identifier}`) as the file identifier.
-4. Add action: **Create file** (File System) — connection from Step 2.
-   - **Folder Path**: `/` (root of the connection) or a subfolder matching
-     the SharePoint folder structure.
-   - **File Name**: use the SharePoint trigger's file name field (`{FilenameWithExtension}`).
+   - **Folder Path**: the destination library/folder, e.g.
+     `/Shared Documents/ExportFolder`.
+   - **File Name**: the trigger's file name (e.g. `{DisplayName}`/`{Name}`).
    - **File Content**: output of **Get file content**.
-5. Because "Create file" fails if the file already exists, add error handling:
-   - Set **Create file**'s "Configure run after" is not needed; instead use
-     **Update file** as a fallback, or better: check first.
-   - Recommended pattern: **Get file metadata using path** (File System) on
-     the target path → **Condition**: if it exists, use **Update file**;
-     otherwise use **Create file**. Configure the "Get file metadata" action
-     to **not** fail the flow on a "file not found" error (Settings →
-     Configure run after → include "has failed", then branch on that).
-6. Save and test by uploading/editing a file in the SharePoint folder.
+5. Because SharePoint's **Create file** action will happily overwrite an
+   existing file by default in most cases, but you may still want
+   update-vs-create logic (e.g. to preserve version history intentionally or
+   branch behavior):
+   - **Get file metadata** (SharePoint) on the target path → **Condition**:
+     if it exists, use **Update file**; otherwise use **Create file**.
+     Configure "Get file metadata"'s **Configure run after** to continue
+     even when it fails (file not found), then branch on that.
+6. Save and test by adding/editing a file on the on-prem share.
 
-> Limitation: this trigger only reports created/changed files, not deletions,
-> and it doesn't recurse into subfolders by default.
+> Limitation: this trigger only reports created/modified files on a polling
+> interval, not deletions, and it doesn't recurse into subfolders by default.
 
 ### Option B — Scheduled full/incremental sync (recommended for folder trees)
 
 Best when you need subfolders, deletions handled, or a periodic reconciliation
-job instead of firing on every micro-change.
+job instead of relying on the polling trigger for every change.
 
 1. **Create** → **Scheduled cloud flow**. Set recurrence, e.g. every 15/30/60
    minutes.
-2. Action: **Get files (properties only)** (SharePoint) or
-   **Send an HTTP request to SharePoint** with a REST call to
-   `_api/web/GetFolderByServerRelativeUrl('/sites/.../Shared Documents/ExportFolder')/Files`
-   if you need recursion through subfolders (the simple "Get files" action
-   is not recursive).
-   - To handle nested folders, use a **Do until** loop with a queue of
-     folder paths, or call a **Child flow** recursively (Power Automate
-     supports calling a flow from another flow for recursion).
+2. Action: **List files in folder** (File System), pointed at the source
+   folder on the share.
+   - This action is **not recursive**. To handle nested folders, use a
+     **Do until** loop with a queue of folder paths, or call a
+     **Child flow** recursively (Power Automate supports calling a flow
+     from another flow for recursion) — recurse using
+     **List files in folder** on each discovered subfolder.
 3. **Apply to each** file returned:
-   a. **Get file content** (SharePoint), using the file's `Id`/path.
-   b. **Get file metadata using path** (File System) at the mirrored path on
-      the file share — configure run-after to catch "not found" as a
-      non-terminating branch.
-   c. **Condition**: compare SharePoint's `Modified` timestamp to the file
-      share's `LastModifiedDateTime` (skip the copy if the file share copy is
+   a. **Get file content** (File System), using the file's `Path`.
+   b. **Get file metadata** (SharePoint) at the mirrored destination path —
+      configure run-after to catch "not found" as a non-terminating branch.
+   c. **Condition**: compare the file share's `LastModified` timestamp to
+      SharePoint's `Modified` field (skip the copy if the SharePoint copy is
       already current — this keeps it an *incremental* sync).
-   d. If new or newer: **Create file** or **Update file** (File System) to
+   d. If new or newer: **Create file** or **Update file** (SharePoint) to
       write the content to the mirrored path.
-4. (Optional, for true mirroring) Add a step to detect files present on the
-   file share but no longer in SharePoint, and delete them via
-   **Delete file** (File System). This requires listing the file share
-   contents too (**List files in folder** – File System) and diffing the two
-   lists in a **Compose**/**Filter array** step.
+4. (Optional, for true mirroring) Add a step to detect files present in
+   SharePoint but no longer on the source file share, and delete them via
+   **Delete file** (SharePoint). This requires listing the SharePoint
+   library contents too (**Get files (properties only)** or a REST call)
+   and diffing the two lists in a **Compose**/**Filter array** step.
 5. Save and do a manual **Test → Manually** run first before relying on the
    recurrence trigger.
 
@@ -150,14 +153,14 @@ job instead of firing on every micro-change.
 
 ## Step 5 — Preserve folder structure (if syncing a tree)
 
-- Compute the relative path once by trimming the SharePoint library root off
-  each file's server-relative URL, e.g.:
-  `substring(triggerOutputs()?['body/{Path}'], length('/Shared Documents/ExportFolder/'))`
-- Use that relative path when calling **Create file/Update file** so the
-  file share mirrors the same subfolder layout.
-- If a subfolder doesn't exist yet on the file share, add a
-  **Create folder** (File System) call guarded by a "does folder exist"
-  check (same pattern as Step 4A.5), before writing files into it.
+- Compute the relative path once by trimming the File System connection's
+  root folder off each file's full path, e.g.:
+  `substring(items('Apply_to_each')?['Path'], length('/ExportFolder/'))`
+- Use that relative path when calling **Create file/Update file** (SharePoint)
+  so the destination library mirrors the same subfolder layout.
+- If a subfolder doesn't exist yet in SharePoint, add a **Create new folder**
+  (SharePoint) call guarded by a "does folder exist" check (same pattern as
+  Step 4A.5), before writing files into it.
 
 ## Step 6 — Error handling & resiliency
 
@@ -167,20 +170,21 @@ job instead of firing on every micro-change.
 2. In `Catch`, add a **Send an email (V2)** or **Post message in Teams**
    action to notify an admin, including `result('Try')` for diagnostics.
 3. Turn on flow-level **run-after settings** so one file's failure (e.g., a
-   locked file) doesn't stop the whole batch — set "Configure run after" on
-   downstream actions inside the loop to continue on failure, and log
-   failures to a **SharePoint list** or **Compose**/**Append to array
-   variable** for a summary at the end.
+   locked file on the share) doesn't stop the whole batch — set "Configure
+   run after" on downstream actions inside the loop to continue on failure,
+   and log failures to a **SharePoint list** or **Compose**/**Append to
+   array variable** for a summary at the end.
 4. Set the flow's **Concurrency Control** (on the "Apply to each") if you
    need to throttle how many files are processed in parallel — useful to
-   avoid overloading the gateway/file share.
+   avoid overloading the gateway/file share, and to respect SharePoint
+   throttling limits.
 
 ## Step 7 — Test
 
-1. Add/modify a test file in the SharePoint folder.
+1. Add/modify a test file on the on-prem file share.
 2. Run the flow manually (or wait for the trigger/recurrence).
 3. Check **Flow run history** for success, and confirm the file appears
-   correctly at the file share path.
+   correctly in the SharePoint destination folder.
 4. Test edge cases: large files (check for size limits/timeouts), special
    characters in filenames, nested folders, and (for Option B) deletions.
 5. Test failure handling by pointing the File System connection at an
@@ -207,8 +211,9 @@ job instead of firing on every micro-change.
 | Issue | Cause | Fix |
 |---|---|---|
 | "The gateway is offline" | Gateway machine sleeping/rebooted/service stopped | Ensure it's a server-class machine, disable sleep, set gateway service to auto-start |
-| "Create file" fails with "file already exists" | No existence check before create | Use Get-metadata → Condition → Create/Update pattern (Step 4) |
-| Only top-level files sync, subfolders ignored | `Get files` action isn't recursive | Use recursive HTTP REST call or child-flow recursion (Option B) |
-| Deleted SharePoint files remain on file share | Sync only handles create/update | Add a reconciliation/diff step to delete orphaned files (Step 4B.4) |
-| Flow times out on large libraries | Loop iterating too many items serially | Enable concurrency control, or paginate with `top`/`skip` in the REST call |
+| Files don't sync immediately | File System triggers are polling-based, not instant push | Set a shorter polling interval, or fall back to the scheduled-flow pattern (Option B) for tighter control |
+| Only top-level files sync, subfolders ignored | `List files in folder` action isn't recursive | Use a `Do until` loop with a folder queue, or child-flow recursion (Option B) |
+| Deleted file-share files remain in SharePoint | Sync only handles create/update | Add a reconciliation/diff step to delete orphaned SharePoint files (Step 4B.4) |
+| Flow times out on large shares | Loop iterating too many items serially | Enable concurrency control, or paginate the `List files in folder` results |
 | "Unauthorized" on File System connection | Service account lacks share permissions, or password rotated | Re-enter credentials on the connection; verify NTFS + share permissions |
+| SharePoint throttling (429 errors) | Too many rapid create/update calls | Add concurrency limits and retry policies on the SharePoint actions |
